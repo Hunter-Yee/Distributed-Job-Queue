@@ -11,4 +11,4 @@
 **CI/CD**: GitHub Actions  
 
 ## Steps:
-- HTTP Ingestion: job_handler.go parses incoming JSON request via CreateJobRequest.Validate, instantiates a job with status 'queued', saves it to PostgreSQL.
+**HTTP Ingestion**: job_handler.go parses incoming JSON request via CreateJobRequest.Validate, instantiates a job with status 'queued', saves it to PostgreSQL.

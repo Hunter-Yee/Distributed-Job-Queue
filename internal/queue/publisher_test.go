@@ -29,6 +29,18 @@ func (m *MockJobPublisher) Publish(ctx context.Context, job *models.Job) error {
 	return nil
 }
 
+func (m *MockJobPublisher) Ping() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Err != nil {
+		return m.Err
+	}
+	if m.Closed {
+		return queue.ErrPublisherClosed
+	}
+	return nil
+}
+
 func (m *MockJobPublisher) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

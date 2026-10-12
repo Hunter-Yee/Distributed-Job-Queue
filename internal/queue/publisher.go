@@ -24,6 +24,7 @@ const (
 // JobPublisher defines the contract for dispatching jobs to a message broker.
 type JobPublisher interface {
 	Publish(ctx context.Context, job *models.Job) error
+	Ping() error
 	Close() error
 }
 
