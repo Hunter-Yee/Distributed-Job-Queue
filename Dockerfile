@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /api-server ./cmd/api
 # Final Stage
 FROM alpine:3.20
 
-RUN apk add --no-ca-certificates ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 
