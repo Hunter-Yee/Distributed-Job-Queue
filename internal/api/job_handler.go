@@ -9,17 +9,22 @@ import (
 	"time"
 
 	"distributed-job-queue/internal/models"
+	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
 
 	"github.com/google/uuid"
 )
 
 type JobHandler struct {
-	repo repository.JobRepository
+	repo      repository.JobRepository
+	publisher queue.JobPublisher
 }
 
-func NewJobHandler(repo repository.JobRepository) *JobHandler {
-	return &JobHandler{repo: repo}
+func NewJobHandler(repo repository.JobRepository, publisher queue.JobPublisher) *JobHandler {
+	return &JobHandler{
+		repo:      repo,
+		publisher: publisher,
+	}
 }
 
 func (h *JobHandler) CreateJob(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +59,13 @@ func (h *JobHandler) CreateJob(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.repo.Create(r.Context(), job); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save job: %v", err))
+		return
+	}
+
+	// Publish to queue (compensate on failure by updating status to failed)
+	if err := h.publisher.Publish(r.Context(), job); err != nil {
+		_ = h.repo.UpdateStatus(r.Context(), job.ID, models.StatusFailed)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to publish job to queue: %v", err))
 		return
 	}
 

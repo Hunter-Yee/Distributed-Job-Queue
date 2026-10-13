@@ -4,14 +4,15 @@ import (
 	"database/sql"
 	"net/http"
 
+	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
 )
 
-func NewRouter(db *sql.DB) http.Handler {
+func NewRouter(db *sql.DB, publisher queue.JobPublisher) http.Handler {
 	mux := http.NewServeMux()
 
 	repo := repository.NewPostgresJobRepository(db)
-	jobHandler := NewJobHandler(repo)
+	jobHandler := NewJobHandler(repo, publisher)
 
 	// Register API endpoints
 	mux.HandleFunc("POST /jobs", jobHandler.CreateJob)
@@ -23,6 +24,12 @@ func NewRouter(db *sql.DB) http.Handler {
 		if err := db.Ping(); err != nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "database unavailable")
 			return
+		}
+		if publisher != nil {
+			if err := publisher.Ping(); err != nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "message broker unavailable")
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

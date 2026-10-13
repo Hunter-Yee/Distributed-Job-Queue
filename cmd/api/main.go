@@ -13,6 +13,7 @@ import (
 	"distributed-job-queue/internal/api"
 	"distributed-job-queue/internal/config"
 	"distributed-job-queue/internal/db"
+	"distributed-job-queue/internal/queue"
 )
 
 func main() {
@@ -27,8 +28,15 @@ func main() {
 	}
 	defer database.Close()
 
+	// Initialize RabbitMQ publisher
+	publisher, err := queue.NewRabbitMQPublisher(cfg.RabbitMQURL())
+	if err != nil {
+		log.Fatalf("RabbitMQ initialization failed: %v", err)
+	}
+	defer publisher.Close()
+
 	// Initialize router
-	router := api.NewRouter(database)
+	router := api.NewRouter(database, publisher)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

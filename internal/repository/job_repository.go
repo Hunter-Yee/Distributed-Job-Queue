@@ -16,6 +16,7 @@ type JobRepository interface {
 	Create(ctx context.Context, job *models.Job) error
 	GetByID(ctx context.Context, id string) (*models.Job, error)
 	List(ctx context.Context, limit, offset int) ([]*models.Job, error)
+	UpdateStatus(ctx context.Context, id string, status models.JobStatus) error
 }
 
 type PostgresJobRepository struct {
@@ -161,3 +162,26 @@ func (r *PostgresJobRepository) List(ctx context.Context, limit, offset int) ([]
 
 	return jobs, nil
 }
+
+func (r *PostgresJobRepository) UpdateStatus(ctx context.Context, id string, status models.JobStatus) error {
+	query := `
+		UPDATE jobs
+		SET status = $1, updated_at = NOW()
+		WHERE id = $2
+	`
+	res, err := r.db.ExecContext(ctx, query, string(status), id)
+	if err != nil {
+		return fmt.Errorf("failed to update job status: %w", err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check affected rows: %w", err)
+	}
+	if rows == 0 {
+		return ErrJobNotFound
+	}
+
+	return nil
+}
+

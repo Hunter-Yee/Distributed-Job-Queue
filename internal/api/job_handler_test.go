@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"distributed-job-queue/internal/api"
 	"distributed-job-queue/internal/models"
+	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
 )
 
@@ -54,9 +56,57 @@ func (m *MockJobRepository) List(ctx context.Context, limit, offset int) ([]*mod
 	return result, nil
 }
 
+func (m *MockJobRepository) UpdateStatus(ctx context.Context, id string, status models.JobStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, exists := m.jobs[id]
+	if !exists {
+		return repository.ErrJobNotFound
+	}
+	job.Status = status
+	return nil
+}
+
+type MockJobPublisher struct {
+	mu        sync.Mutex
+	Published []*models.Job
+	PublishErr error
+	PingErr    error
+	Closed     bool
+}
+
+func (m *MockJobPublisher) Publish(ctx context.Context, job *models.Job) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.PublishErr != nil {
+		return m.PublishErr
+	}
+	m.Published = append(m.Published, job)
+	return nil
+}
+
+func (m *MockJobPublisher) Ping() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.PingErr != nil {
+		return m.PingErr
+	}
+	return nil
+}
+
+func (m *MockJobPublisher) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Closed = true
+	return nil
+}
+
+var _ queue.JobPublisher = (*MockJobPublisher)(nil)
+
 func TestJobHandler_CreateJob_Phase3Format(t *testing.T) {
 	mockRepo := NewMockJobRepository()
-	handler := api.NewJobHandler(mockRepo)
+	mockPublisher := &MockJobPublisher{}
+	handler := api.NewJobHandler(mockRepo, mockPublisher)
 
 	reqBody := []byte(`{
 		"type": "report",
@@ -107,7 +157,8 @@ func TestJobHandler_CreateJob_Phase3Format(t *testing.T) {
 
 func TestJobHandler_CreateJob_Phase4Format(t *testing.T) {
 	mockRepo := NewMockJobRepository()
-	handler := api.NewJobHandler(mockRepo)
+	mockPublisher := &MockJobPublisher{}
+	handler := api.NewJobHandler(mockRepo, mockPublisher)
 
 	reqBody := []byte(`{
 		"type": "image_processing",
@@ -141,11 +192,53 @@ func TestJobHandler_CreateJob_Phase4Format(t *testing.T) {
 	if createdJob.Payload.DurationMS != 2000 {
 		t.Errorf("expected duration_ms 2000, got %d", createdJob.Payload.DurationMS)
 	}
+
+	if len(mockPublisher.Published) != 1 {
+		t.Errorf("expected 1 published job, got %d", len(mockPublisher.Published))
+	}
+}
+
+func TestJobHandler_CreateJob_PublishFailureCompensation(t *testing.T) {
+	mockRepo := NewMockJobRepository()
+	mockPublisher := &MockJobPublisher{
+		PublishErr: errors.New("rabbitmq connection failure"),
+	}
+	handler := api.NewJobHandler(mockRepo, mockPublisher)
+
+	reqBody := []byte(`{
+		"type": "email",
+		"priority": "high"
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewBuffer(reqBody))
+	w := httptest.NewRecorder()
+
+	handler.CreateJob(w, req)
+
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected status 500 InternalServerError, got %d", res.StatusCode)
+	}
+
+	// Verify compensating transaction: job in repository should have status 'failed'
+	jobs, err := mockRepo.List(context.Background(), 10, 0)
+	if err != nil {
+		t.Fatalf("failed to list jobs from mock repo: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job in repository, got %d", len(jobs))
+	}
+	if jobs[0].Status != models.StatusFailed {
+		t.Errorf("expected job status to be compensated to 'failed', got %s", jobs[0].Status)
+	}
 }
 
 func TestJobHandler_GetJobByID_NotFound(t *testing.T) {
 	mockRepo := NewMockJobRepository()
-	handler := api.NewJobHandler(mockRepo)
+	mockPublisher := &MockJobPublisher{}
+	handler := api.NewJobHandler(mockRepo, mockPublisher)
 
 	req := httptest.NewRequest(http.MethodGet, "/jobs/job-nonexistent", nil)
 	req.SetPathValue("id", "job-nonexistent")
@@ -163,7 +256,8 @@ func TestJobHandler_GetJobByID_NotFound(t *testing.T) {
 
 func TestJobHandler_GetJobByID_Found(t *testing.T) {
 	mockRepo := NewMockJobRepository()
-	handler := api.NewJobHandler(mockRepo)
+	mockPublisher := &MockJobPublisher{}
+	handler := api.NewJobHandler(mockRepo, mockPublisher)
 
 	existingJob := &models.Job{
 		ID:        "job-123",
@@ -199,3 +293,36 @@ func TestJobHandler_GetJobByID_Found(t *testing.T) {
 		t.Errorf("expected job-123, got %s", fetchedJob.ID)
 	}
 }
+
+func TestJobHandler_ListJobs(t *testing.T) {
+	mockRepo := NewMockJobRepository()
+	mockPublisher := &MockJobPublisher{}
+	handler := api.NewJobHandler(mockRepo, mockPublisher)
+
+	job1 := &models.Job{ID: "job-1", Type: models.JobTypeEmail, Priority: models.PriorityLow, Status: models.StatusQueued}
+	job2 := &models.Job{ID: "job-2", Type: models.JobTypeReport, Priority: models.PriorityHigh, Status: models.StatusQueued}
+	_ = mockRepo.Create(context.Background(), job1)
+	_ = mockRepo.Create(context.Background(), job2)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	w := httptest.NewRecorder()
+
+	handler.ListJobs(w, req)
+
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", res.StatusCode)
+	}
+
+	var jobs []*models.Job
+	if err := json.NewDecoder(res.Body).Decode(&jobs); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(jobs) != 2 {
+		t.Errorf("expected 2 jobs, got %d", len(jobs))
+	}
+}
+
