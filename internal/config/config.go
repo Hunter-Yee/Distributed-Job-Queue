@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 type Config struct {
@@ -17,21 +18,39 @@ type Config struct {
 	RabbitMQPort     string
 	RabbitMQUser     string
 	RabbitMQPassword string
+	WorkerConcurrency int
+	WorkerPrefetch   int
 }
 
 func LoadConfig() *Config {
+	concurrency := 5
+	if cStr := os.Getenv("WORKER_CONCURRENCY"); cStr != "" {
+		if val, err := strconv.Atoi(cStr); err == nil && val > 0 {
+			concurrency = val
+		}
+	}
+
+	prefetch := 10
+	if pStr := os.Getenv("WORKER_PREFETCH"); pStr != "" {
+		if val, err := strconv.Atoi(pStr); err == nil && val > 0 {
+			prefetch = val
+		}
+	}
+
 	return &Config{
-		Port:             getEnv("PORT", "8080"),
-		DBHost:           getEnv("DB_HOST", "db"),
-		DBPort:           getEnv("DB_PORT", "5432"),
-		DBUser:           getEnv("DB_USER", "postgres"),
-		DBPassword:       getEnv("DB_PASSWORD", "postgres"),
-		DBName:           getEnv("DB_NAME", "jobqueue"),
-		DBSSLMode:        getEnv("DB_SSLMODE", "disable"),
-		RabbitMQHost:     getEnv("RABBITMQ_HOST", "localhost"),
-		RabbitMQPort:     getEnv("RABBITMQ_PORT", "5672"),
-		RabbitMQUser:     getEnv("RABBITMQ_USER", "guest"),
-		RabbitMQPassword: getEnv("RABBITMQ_PASSWORD", "guest"),
+		Port:              getEnv("PORT", "8080"),
+		DBHost:            getEnv("DB_HOST", "db"),
+		DBPort:            getEnv("DB_PORT", "5432"),
+		DBUser:            getEnv("DB_USER", "postgres"),
+		DBPassword:        getEnv("DB_PASSWORD", "postgres"),
+		DBName:            getEnv("DB_NAME", "jobqueue"),
+		DBSSLMode:         getEnv("DB_SSLMODE", "disable"),
+		RabbitMQHost:      getEnv("RABBITMQ_HOST", "localhost"),
+		RabbitMQPort:      getEnv("RABBITMQ_PORT", "5672"),
+		RabbitMQUser:      getEnv("RABBITMQ_USER", "guest"),
+		RabbitMQPassword:  getEnv("RABBITMQ_PASSWORD", "guest"),
+		WorkerConcurrency: concurrency,
+		WorkerPrefetch:    prefetch,
 	}
 }
 

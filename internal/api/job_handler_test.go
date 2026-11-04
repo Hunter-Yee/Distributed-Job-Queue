@@ -67,6 +67,18 @@ func (m *MockJobRepository) UpdateStatus(ctx context.Context, id string, status 
 	return nil
 }
 
+func (m *MockJobRepository) RecordAttempt(ctx context.Context, id string, status models.JobStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, exists := m.jobs[id]
+	if !exists {
+		return repository.ErrJobNotFound
+	}
+	job.Attempts++
+	job.Status = status
+	return nil
+}
+
 type MockJobPublisher struct {
 	mu        sync.Mutex
 	Published []*models.Job
