@@ -19,7 +19,9 @@ type Config struct {
 	RabbitMQUser     string
 	RabbitMQPassword string
 	WorkerConcurrency int
-	WorkerPrefetch   int
+	WorkerPrefetch    int
+	MaxRetries        int
+	BaseRetryDelayMS  int
 }
 
 func LoadConfig() *Config {
@@ -37,6 +39,20 @@ func LoadConfig() *Config {
 		}
 	}
 
+	maxRetries := 3
+	if rStr := os.Getenv("MAX_RETRIES"); rStr != "" {
+		if val, err := strconv.Atoi(rStr); err == nil && val >= 0 {
+			maxRetries = val
+		}
+	}
+
+	baseRetryDelayMS := 1000 // 1 second
+	if dStr := os.Getenv("BASE_RETRY_DELAY_MS"); dStr != "" {
+		if val, err := strconv.Atoi(dStr); err == nil && val > 0 {
+			baseRetryDelayMS = val
+		}
+	}
+
 	return &Config{
 		Port:              getEnv("PORT", "8080"),
 		DBHost:            getEnv("DB_HOST", "db"),
@@ -51,6 +67,8 @@ func LoadConfig() *Config {
 		RabbitMQPassword:  getEnv("RABBITMQ_PASSWORD", "guest"),
 		WorkerConcurrency: concurrency,
 		WorkerPrefetch:    prefetch,
+		MaxRetries:        maxRetries,
+		BaseRetryDelayMS:  baseRetryDelayMS,
 	}
 }
 

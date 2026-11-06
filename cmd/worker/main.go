@@ -9,6 +9,7 @@ import (
 
 	"distributed-job-queue/internal/config"
 	"distributed-job-queue/internal/db"
+	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
 	"distributed-job-queue/internal/worker"
 )
@@ -29,13 +30,22 @@ func main() {
 	repo := repository.NewPostgresJobRepository(database)
 	executor := worker.NewSimulatedExecutor()
 
+	// Initialize RabbitMQ publisher for retries and DLQ routing
+	publisher, err := queue.NewRabbitMQPublisher(cfg.RabbitMQURL())
+	if err != nil {
+		log.Fatalf("Worker RabbitMQ publisher initialization failed: %v", err)
+	}
+	defer publisher.Close()
+
 	consumerCfg := worker.ConsumerConfig{
-		RabbitMQURL: cfg.RabbitMQURL(),
-		Concurrency: cfg.WorkerConcurrency,
-		Prefetch:    cfg.WorkerPrefetch,
+		RabbitMQURL:      cfg.RabbitMQURL(),
+		Concurrency:      cfg.WorkerConcurrency,
+		Prefetch:         cfg.WorkerPrefetch,
+		MaxRetries:       cfg.MaxRetries,
+		BaseRetryDelayMS: cfg.BaseRetryDelayMS,
 	}
 
-	consumer := worker.NewConsumer(consumerCfg, repo, executor)
+	consumer := worker.NewConsumer(consumerCfg, repo, publisher, executor)
 
 	// Context with cancellation on SIGINT/SIGTERM
 	ctx, cancel := context.WithCancel(context.Background())

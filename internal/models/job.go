@@ -35,6 +35,7 @@ const (
 	StatusProcessing JobStatus = "processing"
 	StatusCompleted  JobStatus = "completed"
 	StatusFailed     JobStatus = "failed"
+	StatusDeadLetter JobStatus = "dead_letter"
 )
 
 // JobPayload contains execution parameters for simulated workloads.

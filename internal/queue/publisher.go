@@ -17,6 +17,24 @@ const (
 	// DefaultJobsRoutingKey is the routing key for processing standard jobs.
 	DefaultJobsRoutingKey = "jobs.process"
 
+	// DefaultRetryExchange is the direct exchange used for delayed retries.
+	DefaultRetryExchange = "jobs.retry.direct"
+
+	// DefaultRetryQueue is the TTL retry queue that dead-letters back to jobs.exchange.
+	DefaultRetryQueue = "jobs.retry.queue"
+
+	// DefaultRetryRoutingKey is the routing key for sending jobs to retry queue.
+	DefaultRetryRoutingKey = "jobs.retry"
+
+	// DefaultDLQExchange is the direct exchange for dead-lettered jobs.
+	DefaultDLQExchange = "jobs.dlx"
+
+	// DefaultDLQQueue is the durable queue holding permanently failed/exhausted jobs.
+	DefaultDLQQueue = "jobs.dlq"
+
+	// DefaultDLQRoutingKey is the routing key for dead-letter queue.
+	DefaultDLQRoutingKey = "jobs.dead"
+
 	// MaxPriorityLevel defines the maximum priority level supported by the queue (x-max-priority).
 	MaxPriorityLevel uint8 = 10
 )
@@ -24,6 +42,8 @@ const (
 // JobPublisher defines the contract for dispatching jobs to a message broker.
 type JobPublisher interface {
 	Publish(ctx context.Context, job *models.Job) error
+	PublishRetry(ctx context.Context, msg *QueueJobMessage, delay time.Duration) error
+	PublishDLQ(ctx context.Context, msg *QueueJobMessage, reason string) error
 	Ping() error
 	Close() error
 }
@@ -34,6 +54,8 @@ type QueueJobMessage struct {
 	Type      models.JobType     `json:"type"`
 	Priority  models.JobPriority `json:"priority"`
 	Payload   models.JobPayload  `json:"payload"`
+	Attempts  int                `json:"attempts"`
+	LastError string             `json:"last_error,omitempty"`
 	CreatedAt time.Time          `json:"created_at"`
 }
 
@@ -44,6 +66,7 @@ func NewQueueJobMessage(job *models.Job) *QueueJobMessage {
 		Type:      job.Type,
 		Priority:  job.Priority,
 		Payload:   job.Payload,
+		Attempts:  job.Attempts,
 		CreatedAt: job.CreatedAt,
 	}
 }

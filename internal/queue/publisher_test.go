@@ -13,10 +13,12 @@ import (
 
 // MockJobPublisher provides an in-memory implementation of queue.JobPublisher for testing.
 type MockJobPublisher struct {
-	mu        sync.Mutex
-	Published []*models.Job
-	Closed    bool
-	Err       error
+	mu           sync.Mutex
+	Published    []*models.Job
+	Retried      []*queue.QueueJobMessage
+	DeadLettered []*queue.QueueJobMessage
+	Closed       bool
+	Err          error
 }
 
 func (m *MockJobPublisher) Publish(ctx context.Context, job *models.Job) error {
@@ -26,6 +28,26 @@ func (m *MockJobPublisher) Publish(ctx context.Context, job *models.Job) error {
 		return m.Err
 	}
 	m.Published = append(m.Published, job)
+	return nil
+}
+
+func (m *MockJobPublisher) PublishRetry(ctx context.Context, msg *queue.QueueJobMessage, delay time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Err != nil {
+		return m.Err
+	}
+	m.Retried = append(m.Retried, msg)
+	return nil
+}
+
+func (m *MockJobPublisher) PublishDLQ(ctx context.Context, msg *queue.QueueJobMessage, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Err != nil {
+		return m.Err
+	}
+	m.DeadLettered = append(m.DeadLettered, msg)
 	return nil
 }
 

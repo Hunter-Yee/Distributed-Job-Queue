@@ -18,18 +18,21 @@ import (
 
 // ConsumerConfig holds configuration options for a RabbitMQ worker consumer.
 type ConsumerConfig struct {
-	RabbitMQURL string
-	QueueName   string
-	Prefetch    int
-	Concurrency int
+	RabbitMQURL      string
+	QueueName        string
+	Prefetch         int
+	Concurrency      int
+	MaxRetries       int
+	BaseRetryDelayMS int
 }
 
 // Consumer consumes jobs from RabbitMQ, coordinates a concurrent worker pool,
 // executes tasks, and updates job states in the database.
 type Consumer struct {
-	cfg      ConsumerConfig
-	repo     repository.JobRepository
-	executor Executor
+	cfg       ConsumerConfig
+	repo      repository.JobRepository
+	publisher queue.JobPublisher
+	executor  Executor
 
 	conn *amqp.Connection
 	ch   *amqp.Channel
@@ -38,7 +41,7 @@ type Consumer struct {
 }
 
 // NewConsumer creates a new worker Consumer.
-func NewConsumer(cfg ConsumerConfig, repo repository.JobRepository, executor Executor) *Consumer {
+func NewConsumer(cfg ConsumerConfig, repo repository.JobRepository, publisher queue.JobPublisher, executor Executor) *Consumer {
 	if cfg.QueueName == "" {
 		cfg.QueueName = queue.DefaultJobsQueue
 	}
@@ -48,14 +51,21 @@ func NewConsumer(cfg ConsumerConfig, repo repository.JobRepository, executor Exe
 	if cfg.Prefetch <= 0 {
 		cfg.Prefetch = cfg.Concurrency * 2
 	}
+	if cfg.MaxRetries < 0 {
+		cfg.MaxRetries = 3
+	}
+	if cfg.BaseRetryDelayMS <= 0 {
+		cfg.BaseRetryDelayMS = 1000
+	}
 	if executor == nil {
 		executor = NewSimulatedExecutor()
 	}
 
 	return &Consumer{
-		cfg:      cfg,
-		repo:     repo,
-		executor: executor,
+		cfg:       cfg,
+		repo:      repo,
+		publisher: publisher,
+		executor:  executor,
 	}
 }
 
@@ -158,12 +168,14 @@ func (c *Consumer) processDelivery(ctx context.Context, workerID int, d amqp.Del
 
 	log.Printf("[Worker %d] Received job: %s (type=%s, priority=%s)", workerID, jobMsg.JobID, jobMsg.Type, jobMsg.Priority)
 
-	// 1. Mark status as processing in database
+	// 1. Mark status as processing in database and increment attempts
 	dbCtx, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := c.repo.RecordAttempt(dbCtx, jobMsg.JobID, models.StatusProcessing); err != nil {
 		log.Printf("[Worker %d] Failed to update job %s to processing: %v", workerID, jobMsg.JobID, err)
 	}
 	cancelDB()
+
+	jobMsg.Attempts++
 
 	// 2. Execute job
 	execErr := c.executor.Execute(ctx, &jobMsg)
@@ -173,9 +185,37 @@ func (c *Consumer) processDelivery(ctx context.Context, workerID int, d amqp.Del
 	defer cancelFinalize()
 
 	if execErr != nil {
-		log.Printf("[Worker %d] Job %s execution failed: %v", workerID, jobMsg.JobID, execErr)
-		_ = c.repo.UpdateStatus(finalizeCtx, jobMsg.JobID, models.StatusFailed)
-		// Acknowledge the delivery from the main queue for now (in Step 2 we add retry/DLQ logic)
+		log.Printf("[Worker %d] Job %s execution failed (attempt %d): %v", workerID, jobMsg.JobID, jobMsg.Attempts, execErr)
+
+		// Check if retries are remaining
+		if jobMsg.Attempts < c.cfg.MaxRetries && c.publisher != nil {
+			// Calculate exponential backoff delay: base * 2^(attempts-1)
+			multiplier := 1 << (jobMsg.Attempts - 1)
+			if multiplier > 32 {
+				multiplier = 32
+			}
+			delay := time.Duration(c.cfg.BaseRetryDelayMS*multiplier) * time.Millisecond
+
+			log.Printf("[Worker %d] Re-queuing job %s for retry in %v (attempt %d/%d)",
+				workerID, jobMsg.JobID, delay, jobMsg.Attempts, c.cfg.MaxRetries)
+
+			jobMsg.LastError = execErr.Error()
+			_ = c.repo.UpdateStatus(finalizeCtx, jobMsg.JobID, models.StatusQueued)
+
+			if err := c.publisher.PublishRetry(finalizeCtx, &jobMsg, delay); err != nil {
+				log.Printf("[Worker %d] Failed to publish retry for job %s: %v", workerID, jobMsg.JobID, err)
+			}
+			_ = d.Ack(false)
+			return
+		}
+
+		// Retries exhausted or no publisher: Move to Dead-Letter Queue
+		log.Printf("[Worker %d] Retries exhausted for job %s. Moving to Dead Letter Queue (DLQ).", workerID, jobMsg.JobID)
+		_ = c.repo.UpdateStatus(finalizeCtx, jobMsg.JobID, models.StatusDeadLetter)
+
+		if c.publisher != nil {
+			_ = c.publisher.PublishDLQ(finalizeCtx, &jobMsg, execErr.Error())
+		}
 		_ = d.Ack(false)
 		return
 	}

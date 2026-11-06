@@ -111,9 +111,11 @@ func (p *RabbitMQPublisher) connect() error {
 		return fmt.Errorf("failed to declare exchange: %w", err)
 	}
 
-	// 2. Declare durable queue with priority support
+	// 2. Declare durable main queue with priority support and dead-letter routing to DLQ
 	queueArgs := amqp.Table{
-		"x-max-priority": int(MaxPriorityLevel),
+		"x-max-priority":          int(MaxPriorityLevel),
+		"x-dead-letter-exchange":   DefaultDLQExchange,
+		"x-dead-letter-routing-key": DefaultDLQRoutingKey,
 	}
 	_, err = ch.QueueDeclare(
 		p.queueName,
@@ -129,7 +131,7 @@ func (p *RabbitMQPublisher) connect() error {
 		return fmt.Errorf("failed to declare queue: %w", err)
 	}
 
-	// 3. Bind queue to exchange
+	// 3. Bind main queue to exchange
 	err = ch.QueueBind(
 		p.queueName,
 		DefaultJobsRoutingKey,
@@ -141,6 +143,97 @@ func (p *RabbitMQPublisher) connect() error {
 		_ = ch.Close()
 		_ = conn.Close()
 		return fmt.Errorf("failed to bind queue to exchange: %w", err)
+	}
+
+	// 4. Declare DLQ Exchange and Queue
+	err = ch.ExchangeDeclare(
+		DefaultDLQExchange,
+		"direct",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare dlq exchange: %w", err)
+	}
+
+	_, err = ch.QueueDeclare(
+		DefaultDLQQueue,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare dlq queue: %w", err)
+	}
+
+	err = ch.QueueBind(
+		DefaultDLQQueue,
+		DefaultDLQRoutingKey,
+		DefaultDLQExchange,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to bind dlq queue: %w", err)
+	}
+
+	// 5. Declare Retry Exchange and TTL Queue
+	// When messages expire in the retry queue, RabbitMQ automatically dead-letters them back to DefaultJobsExchange with DefaultJobsRoutingKey.
+	err = ch.ExchangeDeclare(
+		DefaultRetryExchange,
+		"direct",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare retry exchange: %w", err)
+	}
+
+	retryQueueArgs := amqp.Table{
+		"x-dead-letter-exchange":   DefaultJobsExchange,
+		"x-dead-letter-routing-key": DefaultJobsRoutingKey,
+	}
+	_, err = ch.QueueDeclare(
+		DefaultRetryQueue,
+		true,
+		false,
+		false,
+		false,
+		retryQueueArgs,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare retry queue: %w", err)
+	}
+
+	err = ch.QueueBind(
+		DefaultRetryQueue,
+		DefaultRetryRoutingKey,
+		DefaultRetryExchange,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to bind retry queue: %w", err)
 	}
 
 	p.conn = conn
@@ -235,6 +328,101 @@ func (p *RabbitMQPublisher) Publish(ctx context.Context, job *models.Job) error 
 	)
 	if err != nil {
 		return fmt.Errorf("failed to publish message to rabbitmq: %w", err)
+	}
+
+	return nil
+}
+
+// PublishRetry publishes a job to the retry queue with a per-message TTL (expiration)
+// and preserved priority. When TTL expires, RabbitMQ moves the message back to DefaultJobsQueue.
+func (p *RabbitMQPublisher) PublishRetry(ctx context.Context, msg *QueueJobMessage, delay time.Duration) error {
+	if p.isClosed.Load() {
+		return ErrPublisherClosed
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.ch == nil || p.conn == nil || p.conn.IsClosed() {
+		return ErrNotConnected
+	}
+
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal retry message: %w", err)
+	}
+
+	delayMS := int64(delay / time.Millisecond)
+	if delayMS < 100 {
+		delayMS = 100
+	}
+
+	publishing := amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    msg.JobID,
+		Timestamp:    time.Now().UTC(),
+		Priority:     PriorityToAMQP(msg.Priority),
+		Expiration:   fmt.Sprintf("%d", delayMS), // per-message TTL
+		Body:         body,
+	}
+
+	err = p.ch.PublishWithContext(
+		ctx,
+		DefaultRetryExchange,
+		DefaultRetryRoutingKey,
+		false,
+		false,
+		publishing,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to publish retry message to rabbitmq: %w", err)
+	}
+
+	return nil
+}
+
+// PublishDLQ publishes a job message directly to the Dead Letter Queue exchange.
+func (p *RabbitMQPublisher) PublishDLQ(ctx context.Context, msg *QueueJobMessage, reason string) error {
+	if p.isClosed.Load() {
+		return ErrPublisherClosed
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.ch == nil || p.conn == nil || p.conn.IsClosed() {
+		return ErrNotConnected
+	}
+
+	msg.LastError = reason
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal DLQ message: %w", err)
+	}
+
+	publishing := amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    msg.JobID,
+		Timestamp:    time.Now().UTC(),
+		Priority:     PriorityToAMQP(msg.Priority),
+		Headers: amqp.Table{
+			"x-death-reason": reason,
+		},
+		Body: body,
+	}
+
+	err = p.ch.PublishWithContext(
+		ctx,
+		DefaultDLQExchange,
+		DefaultDLQRoutingKey,
+		false,
+		false,
+		publishing,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to publish DLQ message: %w", err)
 	}
 
 	return nil

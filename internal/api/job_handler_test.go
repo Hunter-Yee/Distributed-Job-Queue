@@ -80,11 +80,13 @@ func (m *MockJobRepository) RecordAttempt(ctx context.Context, id string, status
 }
 
 type MockJobPublisher struct {
-	mu        sync.Mutex
-	Published []*models.Job
-	PublishErr error
-	PingErr    error
-	Closed     bool
+	mu           sync.Mutex
+	Published    []*models.Job
+	Retried      []*queue.QueueJobMessage
+	DeadLettered []*queue.QueueJobMessage
+	PublishErr   error
+	PingErr      error
+	Closed       bool
 }
 
 func (m *MockJobPublisher) Publish(ctx context.Context, job *models.Job) error {
@@ -94,6 +96,26 @@ func (m *MockJobPublisher) Publish(ctx context.Context, job *models.Job) error {
 		return m.PublishErr
 	}
 	m.Published = append(m.Published, job)
+	return nil
+}
+
+func (m *MockJobPublisher) PublishRetry(ctx context.Context, msg *queue.QueueJobMessage, delay time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.PublishErr != nil {
+		return m.PublishErr
+	}
+	m.Retried = append(m.Retried, msg)
+	return nil
+}
+
+func (m *MockJobPublisher) PublishDLQ(ctx context.Context, msg *queue.QueueJobMessage, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.PublishErr != nil {
+		return m.PublishErr
+	}
+	m.DeadLettered = append(m.DeadLettered, msg)
 	return nil
 }
 
