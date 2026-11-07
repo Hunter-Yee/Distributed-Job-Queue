@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"distributed-job-queue/internal/metrics"
 	"distributed-job-queue/internal/models"
 	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
@@ -178,13 +179,19 @@ func (c *Consumer) processDelivery(ctx context.Context, workerID int, d amqp.Del
 	jobMsg.Attempts++
 
 	// 2. Execute job
+	metrics.ActiveWorkers.Inc()
+	execStart := time.Now()
 	execErr := c.executor.Execute(ctx, &jobMsg)
+	execDuration := time.Since(execStart).Seconds()
+	metrics.ActiveWorkers.Dec()
 
 	// 3. Update database status and acknowledge/reject delivery
 	finalizeCtx, cancelFinalize := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelFinalize()
 
 	if execErr != nil {
+		metrics.JobsProcessed.WithLabelValues(string(jobMsg.Type), "failed").Inc()
+		metrics.JobExecutionDuration.WithLabelValues(string(jobMsg.Type), "failed").Observe(execDuration)
 		log.Printf("[Worker %d] Job %s execution failed (attempt %d): %v", workerID, jobMsg.JobID, jobMsg.Attempts, execErr)
 
 		// Check if retries are remaining
@@ -205,6 +212,7 @@ func (c *Consumer) processDelivery(ctx context.Context, workerID int, d amqp.Del
 			if err := c.publisher.PublishRetry(finalizeCtx, &jobMsg, delay); err != nil {
 				log.Printf("[Worker %d] Failed to publish retry for job %s: %v", workerID, jobMsg.JobID, err)
 			}
+			metrics.JobsRetried.WithLabelValues(string(jobMsg.Type), string(jobMsg.Priority)).Inc()
 			_ = d.Ack(false)
 			return
 		}
@@ -216,10 +224,13 @@ func (c *Consumer) processDelivery(ctx context.Context, workerID int, d amqp.Del
 		if c.publisher != nil {
 			_ = c.publisher.PublishDLQ(finalizeCtx, &jobMsg, execErr.Error())
 		}
+		metrics.JobsDeadLettered.WithLabelValues(string(jobMsg.Type)).Inc()
 		_ = d.Ack(false)
 		return
 	}
 
+	metrics.JobsProcessed.WithLabelValues(string(jobMsg.Type), "success").Inc()
+	metrics.JobExecutionDuration.WithLabelValues(string(jobMsg.Type), "success").Observe(execDuration)
 	log.Printf("[Worker %d] Job %s completed successfully", workerID, jobMsg.JobID)
 	_ = c.repo.UpdateStatus(finalizeCtx, jobMsg.JobID, models.StatusCompleted)
 	_ = d.Ack(false)

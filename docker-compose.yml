@@ -76,6 +76,7 @@ services:
       RABBITMQ_PASSWORD: guest
       WORKER_CONCURRENCY: 5
       WORKER_PREFETCH: 10
+      WORKER_METRICS_PORT: 9090
       MAX_RETRIES: 3
       BASE_RETRY_DELAY_MS: 1000
     depends_on:
@@ -85,6 +86,31 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: jobqueue-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: jobqueue-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
     restart: unless-stopped
 
 volumes:

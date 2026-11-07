@@ -6,12 +6,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"distributed-job-queue/internal/config"
 	"distributed-job-queue/internal/db"
 	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
 	"distributed-job-queue/internal/worker"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"net/http"
 )
 
 func main() {
@@ -47,6 +51,21 @@ func main() {
 
 	consumer := worker.NewConsumer(consumerCfg, repo, publisher, executor)
 
+	// Expose Prometheus metrics endpoint on a dedicated HTTP server
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    ":" + cfg.WorkerMetricsPort,
+		Handler: metricsMux,
+	}
+
+	go func() {
+		log.Printf("Worker metrics listening on http://localhost:%s/metrics", cfg.WorkerMetricsPort)
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Worker metrics HTTP server error: %v", err)
+		}
+	}()
+
 	// Context with cancellation on SIGINT/SIGTERM
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -64,6 +83,10 @@ func main() {
 	if err := consumer.Start(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("Worker consumer encountered an error: %v", err)
 	}
+
+	shutdownMetricsCtx, cancelMetrics := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelMetrics()
+	_ = metricsServer.Shutdown(shutdownMetricsCtx)
 
 	log.Println("Worker service shut down cleanly.")
 }

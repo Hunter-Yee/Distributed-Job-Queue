@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"distributed-job-queue/internal/metrics"
 	"distributed-job-queue/internal/models"
 	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
@@ -28,6 +29,7 @@ func NewJobHandler(repo repository.JobRepository, publisher queue.JobPublisher) 
 }
 
 func (h *JobHandler) CreateJob(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -58,6 +60,7 @@ func (h *JobHandler) CreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.repo.Create(r.Context(), job); err != nil {
+		metrics.IngestionDuration.WithLabelValues(string(jobType), "db_error").Observe(time.Since(start).Seconds())
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save job: %v", err))
 		return
 	}
@@ -65,9 +68,13 @@ func (h *JobHandler) CreateJob(w http.ResponseWriter, r *http.Request) {
 	// Publish to queue (compensate on failure by updating status to failed)
 	if err := h.publisher.Publish(r.Context(), job); err != nil {
 		_ = h.repo.UpdateStatus(r.Context(), job.ID, models.StatusFailed)
+		metrics.IngestionDuration.WithLabelValues(string(jobType), "publish_error").Observe(time.Since(start).Seconds())
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to publish job to queue: %v", err))
 		return
 	}
+
+	metrics.JobsCreated.WithLabelValues(string(jobType), string(priority)).Inc()
+	metrics.IngestionDuration.WithLabelValues(string(jobType), "success").Observe(time.Since(start).Seconds())
 
 	writeJSON(w, http.StatusCreated, job)
 }

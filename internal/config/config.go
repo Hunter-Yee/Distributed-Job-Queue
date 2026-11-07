@@ -20,6 +20,7 @@ type Config struct {
 	RabbitMQPassword string
 	WorkerConcurrency int
 	WorkerPrefetch    int
+	WorkerMetricsPort string
 	MaxRetries        int
 	BaseRetryDelayMS  int
 }
@@ -65,6 +66,7 @@ func LoadConfig() *Config {
 		RabbitMQPort:      getEnv("RABBITMQ_PORT", "5672"),
 		RabbitMQUser:      getEnv("RABBITMQ_USER", "guest"),
 		RabbitMQPassword:  getEnv("RABBITMQ_PASSWORD", "guest"),
+		WorkerMetricsPort: getEnv("WORKER_METRICS_PORT", "9090"),
 		WorkerConcurrency: concurrency,
 		WorkerPrefetch:    prefetch,
 		MaxRetries:        maxRetries,

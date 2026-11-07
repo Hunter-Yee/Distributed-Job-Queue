@@ -6,6 +6,8 @@ import (
 
 	"distributed-job-queue/internal/queue"
 	"distributed-job-queue/internal/repository"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func NewRouter(db *sql.DB, publisher queue.JobPublisher) http.Handler {
@@ -18,6 +20,9 @@ func NewRouter(db *sql.DB, publisher queue.JobPublisher) http.Handler {
 	mux.HandleFunc("POST /jobs", jobHandler.CreateJob)
 	mux.HandleFunc("GET /jobs/{id}", jobHandler.GetJobByID)
 	mux.HandleFunc("GET /jobs", jobHandler.ListJobs)
+
+	// Prometheus metrics endpoint
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Health check endpoint
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
